@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "880167273080",
+    "firebase_url": "https://video-share-ay-default-rtdb.firebaseio.com",
+    "project_id": "video-share-ay",
+    "storage_bucket": "video-share-ay.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:880167273080:android:b617b2484a0b98462e238d",
+        "android_client_info": {
+          "package_name": "com.example.video_share"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCEG5f_2sdO2hBKwgE5M8tE20E87yahKaE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
