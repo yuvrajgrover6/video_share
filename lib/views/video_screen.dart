@@ -22,8 +22,12 @@ class VideoScreen extends StatelessWidget {
               )),
           SizedBox(height: 20),
           Obx(
-            () => Text(
-                "Video is ${(playbackController.progress.value * 100).toInt()}% downloaded"),
+            () => playbackController.isLastDownloadedUrl.value
+                ? const SizedBox()
+                : Obx(
+                    () => Text(
+                        "Video is ${(playbackController.progress.value * 100).toInt()}% downloaded"),
+                  ),
           ),
           SizedBox(height: 20),
           Obx(() {
@@ -45,11 +49,13 @@ class VideoScreen extends StatelessWidget {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          IconButton(
-                            icon: const Icon(Icons.replay_10),
-                            onPressed: () =>
-                                playbackController.skipForward(-10),
-                          ),
+                          Obx(() => !playbackController.isPlaying.value
+                              ? IconButton(
+                                  icon: const Icon(Icons.replay_10),
+                                  onPressed: () =>
+                                      playbackController.skipForward(-10),
+                                )
+                              : const SizedBox()),
                           // Play/Pause button wrapped in Obx to reflect isPlaying state
                           Obx(() => IconButton(
                                 icon: Icon(playbackController.isPlaying.value
@@ -58,10 +64,13 @@ class VideoScreen extends StatelessWidget {
                                 onPressed: () =>
                                     playbackController.togglePlayPause(),
                               )),
-                          IconButton(
-                            icon: const Icon(Icons.forward_10),
-                            onPressed: () => playbackController.skipForward(10),
-                          ),
+                          Obx(() => !playbackController.isPlaying.value
+                              ? IconButton(
+                                  icon: const Icon(Icons.forward_10),
+                                  onPressed: () =>
+                                      playbackController.skipForward(10),
+                                )
+                              : const SizedBox()),
                         ],
                       ),
                       // Display the current time of the video

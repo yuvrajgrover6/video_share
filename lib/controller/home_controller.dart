@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:video_player/video_player.dart';
 import 'package:firebase_database/firebase_database.dart';
@@ -14,6 +15,7 @@ class PlaybackController extends GetxController {
   RxInt currentTime = 0.obs;
   RxBool isInitialized = false.obs;
   RxBool isBuffering = false.obs;
+  RxBool isLastDownloadedUrl = false.obs;
   final DatabaseReference videoRef =
       FirebaseDatabase.instance.ref('videoPlayback');
   final DatabaseReference videoUrlRef =
@@ -57,6 +59,7 @@ class PlaybackController extends GetxController {
       // If the URL is the same as the last one, use the cached video.
       if (lastDownloadedUrl != null && lastDownloadedUrl == url) {
         print('Loading video from cache');
+        isLastDownloadedUrl.value = true;
         videoPlayerController = VideoPlayerController.file(File(filePath.value))
           ..initialize().then((_) {
             print('Video initialized successfully from local storage');
@@ -74,7 +77,6 @@ class PlaybackController extends GetxController {
             onReceiveProgress: (received, total) {
           if (total != -1) {
             progress.value = (received / total);
-            print('Download progress: ${progress.value}');
           }
         });
 
@@ -187,8 +189,10 @@ class PlaybackController extends GetxController {
       'isPlaying': isPlaying.value,
       'currentTime': currentTime.value,
     }).then((_) {
-      print(
-          'Firebase updated: isPlaying=${isPlaying.value}, currentTime=${currentTime.value}');
+      if (kDebugMode) {
+        print(
+            'Firebase updated: isPlaying=${isPlaying.value}, currentTime=${currentTime.value}');
+      }
     }).catchError((error) {
       print('Error updating Firebase: $error');
     });
