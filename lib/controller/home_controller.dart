@@ -1,40 +1,51 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
-import 'package:get/get.dart';
-import 'package:video_player/video_player.dart';
-import 'package:firebase_database/firebase_database.dart';
-import 'package:dio/dio.dart';
-import 'package:path_provider/path_provider.dart';
 import 'dart:io';
-import 'package:shared_preferences/shared_preferences.dart'; // Add this for storing the last URL.
+import 'package:chewie/chewie.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+import 'package:firebase_database/firebase_database.dart';
+import 'package:video_player/video_player.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class PlaybackController extends GetxController {
   late VideoPlayerController videoPlayerController;
+  late ChewieController chewieController;
+  late DatabaseReference videoUrlRef; // Database reference for video URL
+  DatabaseReference titeRef = FirebaseDatabase.instance.ref().child('title');
+  late DatabaseReference
+      videoRef; // Database reference for video state (play, pause, time)
+  late Timer syncTimer;
 
-  RxBool isPlaying = false.obs;
-  RxInt currentTime = 0.obs;
   RxBool isInitialized = false.obs;
+  RxBool isPlaying = false.obs;
   RxBool isBuffering = false.obs;
+  RxDouble progress = 0.0.obs;
+  RxInt currentTime = 0.obs;
   RxBool isLastDownloadedUrl = false.obs;
-  final DatabaseReference videoRef =
-      FirebaseDatabase.instance.ref('videoPlayback');
-  final DatabaseReference videoUrlRef =
-      FirebaseDatabase.instance.ref('videoUrl');
+  RxString title = ''.obs;
 
-  Timer? _syncTimer;
   Timer? _debounceTimer;
-  static const int SYNC_INTERVAL = 800;
-  static const int DEBOUNCE_DURATION = 500;
-  bool _isUpdatingState = false;
-  static const int SYNC_THRESHOLD = 2;
 
   @override
   void onInit() {
     super.onInit();
-    fetchVideoUrl().then((url) {
-      downloadVideo(url);
+    fetchTitle();
+
+    // Fetch video URL from Firebase Realtime Database
+    videoUrlRef = FirebaseDatabase.instance.ref().child('videoUrl');
+    videoRef = FirebaseDatabase.instance.ref().child('video');
+
+    videoUrlRef.once().then((DatabaseEvent event) {
+      if (event.snapshot.exists) {
+        String videoUrl = event.snapshot.value as String;
+        checkIfVideoExists(videoUrl); // Check if video is already downloaded
+      }
     });
-    // Set both devices to a paused state initially
+
+    // Initialize the videoRef for syncing play/pause and current time
     videoRef.set({
       'isPlaying': false,
       'currentTime': 0,
@@ -43,186 +54,182 @@ class PlaybackController extends GetxController {
     });
   }
 
-  RxDouble progress = 0.0.obs;
-
-  Future<void> downloadVideo(String url) async {
-    RxString filePath = ''.obs;
-    Dio dio = Dio();
-    try {
-      Directory directory = await getApplicationDocumentsDirectory();
-      filePath.value = '${directory.path}/downloaded_video.mp4';
-
-      // Check if the URL is the same as the last downloaded URL.
-      SharedPreferences prefs = await SharedPreferences.getInstance();
-      String? lastDownloadedUrl = prefs.getString('lastDownloadedUrl');
-
-      // If the URL is the same as the last one, use the cached video.
-      if (lastDownloadedUrl != null && lastDownloadedUrl == url) {
-        print('Loading video from cache');
-        isLastDownloadedUrl.value = true;
-        videoPlayerController = VideoPlayerController.file(File(filePath.value))
-          ..initialize().then((_) {
-            print('Video initialized successfully from local storage');
-            isInitialized.value = true;
-            videoPlayerController.addListener(_videoListener);
-            videoPlayerController.seekTo(Duration(seconds: currentTime.value));
-            setupFirebaseListener();
-          }).catchError((error) {
-            print('Error initializing video from local storage: $error');
-          });
-      } else {
-        // If the URL is different or not found, download the video.
-        print('Downloading new video');
-        await dio.download(url, filePath.value,
-            onReceiveProgress: (received, total) {
-          if (total != -1) {
-            progress.value = (received / total);
-          }
-        });
-
-        // Save the new URL after downloading the video.
-        await prefs.setString('lastDownloadedUrl', url);
-
-        // Initialize the video from the downloaded file.
-        videoPlayerController = VideoPlayerController.file(File(filePath.value))
-          ..initialize().then((_) {
-            print('Video initialized successfully after download');
-            isInitialized.value = true;
-            videoPlayerController.addListener(_videoListener);
-            videoPlayerController.seekTo(Duration(seconds: currentTime.value));
-            setupFirebaseListener();
-          }).catchError((error) {
-            print('Error initializing video after download: $error');
-          });
+  Future<void> fetchTitle() async {
+    titeRef.once().then((DatabaseEvent event) {
+      if (event.snapshot.exists) {
+        title.value = event.snapshot.value as String;
       }
-    } catch (e) {
-      print('Error downloading video: $e');
+    });
+  }
+
+  // Check if the video file has already been downloaded using SharedPreferences
+  Future<void> checkIfVideoExists(String videoUrl) async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    String? lastDownloadedUrl = prefs.getString('lastDownloadedUrl');
+
+    // If the video URL is the same, load from local storage
+    if (lastDownloadedUrl == videoUrl) {
+      final documentDirectory = await getApplicationDocumentsDirectory();
+      final file = File('${documentDirectory.path}/video.mp4');
+
+      if (await file.exists()) {
+        isLastDownloadedUrl.value = true;
+        videoPlayerController = VideoPlayerController.file(file);
+        await videoPlayerController.initialize();
+        initializeChewieController();
+        isInitialized.value = true;
+        videoPlayerController.addListener(_videoListener);
+        videoPlayerController.seekTo(Duration(seconds: currentTime.value));
+        setupFirebaseListener();
+      } else {
+        // If the file was deleted, download the video again
+        downloadVideo(videoUrl);
+      }
+    } else {
+      // New video URL, download the video
+      downloadVideo(videoUrl);
     }
   }
 
+  // Download the video file locally
+  Future<void> downloadVideo(String videoUrl) async {
+    isLastDownloadedUrl.value = false;
+    final dio = Dio();
+    final documentDirectory = await getApplicationDocumentsDirectory();
+    final file = File('${documentDirectory.path}/video.mp4');
+
+    await dio.download(videoUrl, file.path,
+        onReceiveProgress: (received, total) {
+      if (total != -1) {
+        progress.value = received / total;
+      }
+    });
+
+    isLastDownloadedUrl.value = true;
+
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setString('lastDownloadedUrl', videoUrl); // Save the video URL
+
+    videoPlayerController = VideoPlayerController.file(file);
+    videoPlayerController.initialize().then((_) {
+      initializeChewieController(); // Initialize Chewie after the video player controller
+      isInitialized.value = true;
+      videoPlayerController.addListener(_videoListener);
+      videoPlayerController.seekTo(Duration(seconds: currentTime.value));
+      setupFirebaseListener();
+    });
+
+    videoPlayerController.setLooping(false);
+    videoPlayerController.setVolume(1.0);
+  }
+
+  // Initialize Chewie controller for better video controls
+  void initializeChewieController() {
+    chewieController = ChewieController(
+      videoPlayerController: videoPlayerController,
+      autoPlay: false,
+      looping: false,
+      materialProgressColors: ChewieProgressColors(
+        playedColor: Colors.blue,
+        handleColor: Colors.blueAccent,
+        backgroundColor: Colors.grey,
+        bufferedColor: Colors.lightGreen,
+      ),
+      placeholder: Container(
+        color: Colors.grey,
+      ),
+      autoInitialize: true,
+    );
+  }
+
+  // Setup Firebase listener for video synchronization
   void setupFirebaseListener() {
     videoRef.onValue.listen((event) {
       if (event.snapshot.exists) {
-        final data = event.snapshot.value as Map<dynamic, dynamic>;
-        if (data["isPlaying"] != null) {
-          bool remotePlayingState = data["isPlaying"];
-          if (remotePlayingState != isPlaying.value) {
-            _handlePlayPause(remotePlayingState);
+        var data = event.snapshot.value as Map;
+        bool shouldPlay = data['isPlaying'];
+        int newTime = data['currentTime'];
+
+        // Handle play/pause synchronization
+        if (shouldPlay != isPlaying.value) {
+          if (shouldPlay) {
+            videoPlayerController.play();
+          } else {
+            videoPlayerController.pause();
           }
+          isPlaying.value = shouldPlay;
         }
-        if (data["currentTime"] != null) {
-          final seconds = data["currentTime"] as int;
-          if ((seconds - currentTime.value).abs() > SYNC_THRESHOLD) {
-            currentTime.value = seconds;
-            videoPlayerController.seekTo(Duration(seconds: seconds));
-            print('Syncing to current time: $seconds');
-          }
+
+        // Handle time synchronization
+        if ((newTime - currentTime.value).abs() > 1) {
+          videoPlayerController.seekTo(Duration(seconds: newTime));
+          currentTime.value = newTime;
         }
       }
     });
   }
 
+  // Video listener to sync the state to Firebase
   void _videoListener() {
-    if (videoPlayerController.value.isPlaying) {
-      currentTime.value = videoPlayerController.value.position.inSeconds;
-      updatePlaybackState(); // Update Firebase with the new time
-    }
-  }
-
-  void _handlePlayPause(bool shouldPlay) async {
-    if (_isUpdatingState) return;
-
-    isPlaying.value = shouldPlay; // Update state immediately
-
-    if (shouldPlay) {
-      isBuffering.value = true;
-
-      // Check if the devices are synced
-      if ((videoPlayerController.value.position.inSeconds - currentTime.value)
-              .abs() <=
-          1) {
-        await videoPlayerController.play();
-        print('Playing video at synced time');
-      } else {
-        await syncToCurrentTime(
-            currentTime.value); // Sync the time before playing
-        await videoPlayerController.play();
-        print('Video started after syncing');
-      }
-
+    if (!videoPlayerController.value.isBuffering) {
       isBuffering.value = false;
-    } else {
-      await videoPlayerController.pause();
-      print('Video paused');
-    }
-
-    // Update Firebase immediately
-    updatePlaybackState();
-  }
-
-  Future<void> syncToCurrentTime(int targetTime) async {
-    videoPlayerController.seekTo(Duration(seconds: targetTime));
-    print('Seeking video to $targetTime');
-
-    // Wait until the player is at the correct time
-    while ((videoPlayerController.value.position.inSeconds - targetTime).abs() >
-        0) {
-      await Future.delayed(
-          const Duration(milliseconds: 300)); // Poll every 300 ms
       currentTime.value = videoPlayerController.value.position.inSeconds;
-    }
-  }
 
-  void startSyncTimer() {
-    stopSyncTimer();
-    _syncTimer = Timer.periodic(Duration(milliseconds: SYNC_INTERVAL), (timer) {
-      updatePlaybackState(); // Sync state at regular intervals
-    });
-  }
-
-  void stopSyncTimer() {
-    _syncTimer?.cancel();
-  }
-
-  void updatePlaybackState() {
-    videoRef.set({
-      'isPlaying': isPlaying.value,
-      'currentTime': currentTime.value,
-    }).then((_) {
-      if (kDebugMode) {
-        print(
-            'Firebase updated: isPlaying=${isPlaying.value}, currentTime=${currentTime.value}');
+      // Sync the current state to Firebase (debounced)
+      if (_debounceTimer?.isActive ?? false) {
+        _debounceTimer!.cancel();
       }
-    }).catchError((error) {
-      print('Error updating Firebase: $error');
-    });
-  }
-
-  Future<String> fetchVideoUrl() async {
-    DataSnapshot snapshot = await videoUrlRef.get();
-    if (snapshot.exists) {
-      return snapshot.value.toString();
+      _debounceTimer = Timer(const Duration(milliseconds: 500), () {
+        videoRef.update({
+          'isPlaying': videoPlayerController.value.isPlaying,
+          'currentTime': currentTime.value,
+        });
+      });
     } else {
-      throw Exception('No video URL found');
+      isBuffering.value = true;
     }
   }
 
+  // Play or pause the video
   void togglePlayPause() {
-    isPlaying.value = !isPlaying.value;
-    _handlePlayPause(isPlaying.value);
+    if (isPlaying.value) {
+      videoPlayerController.pause();
+      videoRef.update({
+        'isPlaying': false,
+      });
+      isPlaying.value = false;
+    } else {
+      videoPlayerController.play();
+      videoRef.update({
+        'isPlaying': true,
+      });
+      isPlaying.value = true;
+    }
   }
 
+  // Skip forward or backward
   void skipForward(int seconds) {
-    final newPosition =
-        videoPlayerController.value.position + Duration(seconds: seconds);
-    videoPlayerController.seekTo(newPosition);
-    currentTime.value = newPosition.inSeconds;
-    updatePlaybackState();
-    print('Skipped forward by $seconds seconds');
+    int newTime = currentTime.value + seconds;
+    if (newTime < 0) {
+      newTime = 0;
+    } else if (newTime > videoPlayerController.value.duration.inSeconds) {
+      newTime = videoPlayerController.value.duration.inSeconds;
+    }
+    videoPlayerController.seekTo(Duration(seconds: newTime));
+    videoRef.update({
+      'currentTime': newTime,
+    });
+    currentTime.value = newTime;
+  }
+
+  // Stop the synchronization timer
+  void stopSyncTimer() {
+    syncTimer.cancel();
   }
 
   @override
   void onClose() {
+    chewieController.dispose();
     videoPlayerController.removeListener(_videoListener);
     videoPlayerController.dispose();
     stopSyncTimer();
